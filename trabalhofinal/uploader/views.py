@@ -1,6 +1,9 @@
 from django.shortcuts import render, redirect
 import pandas as pd
 import io
+import os
+from django.conf import settings
+from django.core.files.storage import default_storage
 from .analytics import DataAnalyzer
 from .ml_models import run_ml_task
 
@@ -14,11 +17,21 @@ def upload_file(request):
             )
 
         try:
-            df = pd.read_csv(f, encoding="utf-8", on_bad_lines="skip")
-            request.session["dataframe"] = df.to_json(orient="split")
+            save_path = os.path.join('uploads', f.name)
+            actual_path = default_storage.save(save_path, f)
+            full_fs_path = os.path.join(settings.MEDIA_ROOT, actual_path)
+
+            df = pd.read_csv(full_fs_path, encoding="utf-8", on_bad_lines="skip")
+            
+            request.session["file_path"] = actual_path
             request.session["df_columns"] = list(df.columns)
+            request.session.pop("dataframe", None)
+            
             return redirect("analysis")
         except Exception as e:
+            if 'actual_path' in locals() and default_storage.exists(actual_path):
+                default_storage.delete(actual_path)
+            
             return render(
                 request,
                 "uploader/upload.html",
@@ -29,8 +42,8 @@ def upload_file(request):
 
 
 def analysis_view(request):
-    df_json = request.session.get("dataframe")
-    if not df_json:
+    file_path = request.session.get("file_path")
+    if not file_path:
         return render(
             request,
             "uploader/analysis.html",
@@ -41,7 +54,19 @@ def analysis_view(request):
         )
 
     try:
-        df = pd.read_json(io.StringIO(df_json), orient="split")
+        full_fs_path = os.path.join(settings.MEDIA_ROOT, file_path)
+        
+        if not default_storage.exists(file_path):
+             return render(
+                request,
+                "uploader/analysis.html",
+                {
+                    "plots": [],
+                    "error": "Arquivo não encontrado ou expirado. Por favor, faça o upload novamente.",
+                },
+            )
+
+        df = pd.read_csv(full_fs_path, encoding="utf-8", on_bad_lines="skip")
 
         if df.empty:
             return render(
@@ -118,8 +143,8 @@ def prediction_view(request):
     ctx = {"input_fields": input_fields}
 
     if request.method == "POST":
-        df_json = request.session.get("dataframe")
-        if not df_json:
+        file_path = request.session.get("file_path")
+        if not file_path:
             ctx["prediction"] = {
                 "output": "Sessão expirada. Faça upload do CSV novamente.",
                 "metrics": "",
@@ -127,7 +152,11 @@ def prediction_view(request):
             return render(request, "uploader/prediction.html", ctx)
 
         try:
-            df = pd.read_json(io.StringIO(df_json), orient="split")
+            full_fs_path = os.path.join(settings.MEDIA_ROOT, file_path)
+            if not default_storage.exists(file_path):
+                 raise Exception("Arquivo não encontrado ou expirado. Faça o upload novamente.")
+            
+            df = pd.read_csv(full_fs_path, encoding="utf-8", on_bad_lines="skip")
             analyzer = DataAnalyzer(df)
             df_clean = analyzer.df
 
